@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import './App.css'
 
 const API_URL = 'http://localhost:8000'
+const WS_URL = 'ws://localhost:8000'
 
 const VISUALIZATION_TYPES = [
   { id: 'waveform', label: 'Waveform', icon: '📈' },
@@ -10,314 +11,204 @@ const VISUALIZATION_TYPES = [
   { id: 'power_spectrum', label: 'Power Spectrum', icon: '⚡' },
 ]
 
+const FREQUENCY_BANDS = [
+  { id: 'sub_bass', label: 'Sub Bass', color: '#ef4444', shortLabel: 'Sub' },
+  { id: 'bass', label: 'Bass', color: '#f97316', shortLabel: 'Bass' },
+  { id: 'low_mid', label: 'Low Mid', color: '#eab308', shortLabel: 'Lo-Mid' },
+  { id: 'mid', label: 'Mid', color: '#22c55e', shortLabel: 'Mid' },
+  { id: 'high_mid', label: 'High Mid', color: '#3b82f6', shortLabel: 'Hi-Mid' },
+  { id: 'high', label: 'High', color: '#a855f7', shortLabel: 'High' },
+]
+
 function App() {
-  const [audioData, setAudioData] = useState(null)
-  const [analysisData, setAnalysisData] = useState(null)
+  // Audio state
+  const [sessionId, setSessionId] = useState(null)
+  const [audioInfo, setAudioInfo] = useState(null)
+  const [audioUrl, setAudioUrl] = useState(null)
+  
+  // Visualization data (received from backend)
+  const [vizData, setVizData] = useState(null)
+  const [waveformSegment, setWaveformSegment] = useState(null)
+  const [bandSegment, setBandSegment] = useState(null)
+  
+  // Frequency band mode
+  const [showBands, setShowBands] = useState(false)
+  const [visibleBands, setVisibleBands] = useState({
+    sub_bass: true,
+    bass: true,
+    low_mid: true,
+    mid: true,
+    high_mid: true,
+    high: true
+  })
+  
+  // UI state
   const [loading, setLoading] = useState(false)
-  const [analysisLoading, setAnalysisLoading] = useState(false)
   const [error, setError] = useState(null)
   const [dragOver, setDragOver] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [windowSize, setWindowSize] = useState(5)
   const [vizType, setVizType] = useState('waveform')
-  const [currentFile, setCurrentFile] = useState(null)
+  const [wsConnected, setWsConnected] = useState(false)
   
+  // Refs
   const fileInputRef = useRef(null)
   const canvasRef = useRef(null)
   const audioRef = useRef(null)
+  const wsRef = useRef(null)
   const animationRef = useRef(null)
-  const rawAudioDataRef = useRef(null) // Store raw audio for client-side analysis
+  const currentTimeRef = useRef(0) // For smooth animation
 
-  // Fast FFT using Cooley-Tukey algorithm (O(n log n) instead of O(n²))
-  const fft = useCallback((real, imag) => {
-    const n = real.length
-    if (n <= 1) return
-
-    // Bit-reversal permutation
-    for (let i = 0, j = 0; i < n; i++) {
-      if (i < j) {
-        [real[i], real[j]] = [real[j], real[i]]
-        ;[imag[i], imag[j]] = [imag[j], imag[i]]
-      }
-      let k = n >> 1
-      while (k <= j) {
-        j -= k
-        k >>= 1
-      }
-      j += k
+  // Connect WebSocket
+  const connectWebSocket = useCallback((sid) => {
+    if (wsRef.current) {
+      wsRef.current.close()
     }
-
-    // Cooley-Tukey FFT
-    for (let len = 2; len <= n; len <<= 1) {
-      const halfLen = len >> 1
-      const angle = -2 * Math.PI / len
-      const wReal = Math.cos(angle)
-      const wImag = Math.sin(angle)
-
-      for (let i = 0; i < n; i += len) {
-        let curReal = 1, curImag = 0
-        for (let j = 0; j < halfLen; j++) {
-          const uReal = real[i + j]
-          const uImag = imag[i + j]
-          const tReal = curReal * real[i + j + halfLen] - curImag * imag[i + j + halfLen]
-          const tImag = curReal * imag[i + j + halfLen] + curImag * real[i + j + halfLen]
-          
-          real[i + j] = uReal + tReal
-          imag[i + j] = uImag + tImag
-          real[i + j + halfLen] = uReal - tReal
-          imag[i + j + halfLen] = uImag - tImag
-
-          const newReal = curReal * wReal - curImag * wImag
-          curImag = curReal * wImag + curImag * wReal
-          curReal = newReal
-        }
+    
+    const ws = new WebSocket(`${WS_URL}/ws/${sid}`)
+    
+    ws.onopen = () => {
+      console.log('WebSocket connected')
+      setWsConnected(true)
+      // Request initial waveform data
+      ws.send(JSON.stringify({ type: 'get_visualization', viz_type: 'waveform' }))
+    }
+    
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      
+      if (data.type === 'waveform') {
+        setVizData({ type: 'waveform', ...data.data, duration: data.duration })
+      } else if (data.type === 'fft') {
+        setVizData({ type: 'fft', ...data.data })
+      } else if (data.type === 'spectrogram') {
+        setVizData({ type: 'spectrogram', ...data.data })
+      } else if (data.type === 'power_spectrum') {
+        setVizData({ type: 'power_spectrum', ...data.data })
+      } else if (data.type === 'waveform_segment') {
+        setWaveformSegment(data)
+      } else if (data.type === 'band_segment') {
+        setBandSegment(data)
+      } else if (data.type === 'error') {
+        console.error('WebSocket error:', data.message)
+        setError(data.message)
       }
+    }
+    
+    ws.onclose = () => {
+      console.log('WebSocket disconnected')
+      setWsConnected(false)
+    }
+    
+    ws.onerror = (err) => {
+      console.error('WebSocket error:', err)
+      setError('WebSocket connection failed')
+    }
+    
+    wsRef.current = ws
+  }, [])
+
+  // Request visualization data
+  const requestVisualization = useCallback((type) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'get_visualization', viz_type: type }))
     }
   }, [])
 
-  // Client-side FFT analysis using fast algorithm
-  const computeClientFFT = useCallback((rawData, sampleRate) => {
-    // Use power of 2 for FFT efficiency
-    const n_fft = Math.min(4096, Math.pow(2, Math.floor(Math.log2(rawData.length))))
-    if (n_fft < 256) return null
-
-    // Take middle section with Hanning window
-    const start = Math.max(0, Math.floor(rawData.length / 2 - n_fft / 2))
-    const real = new Float64Array(n_fft)
-    const imag = new Float64Array(n_fft)
-
-    for (let i = 0; i < n_fft; i++) {
-      const window = 0.5 * (1 - Math.cos(2 * Math.PI * i / (n_fft - 1)))
-      real[i] = (rawData[start + i] || 0) * window
+  // Request waveform segment for current time
+  const requestWaveformSegment = useCallback((time, winSize) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'get_waveform_segment',
+        window_size: winSize,
+        current_time: time
+      }))
     }
+  }, [])
 
-    // Run FFT
-    fft(real, imag)
-
-    // Calculate magnitudes (only positive frequencies)
-    const numBins = n_fft / 2
-    const frequencies = []
-    const magnitudes = []
-
-    const maxFreqIdx = Math.min(numBins, Math.floor(20000 * n_fft / sampleRate))
-    const targetPoints = 500
-    const step = Math.max(1, Math.floor(maxFreqIdx / targetPoints))
-
-    for (let i = 0; i < maxFreqIdx; i += step) {
-      const mag = Math.sqrt(real[i] * real[i] + imag[i] * imag[i])
-      frequencies.push(i * sampleRate / n_fft)
-      magnitudes.push(20 * Math.log10(mag + 1e-10))
+  // Request frequency band segment
+  const requestBandSegment = useCallback((time, winSize) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'get_band_segment',
+        window_size: winSize,
+        current_time: time
+      }))
     }
+  }, [])
 
-    return { frequencies, magnitudes }
-  }, [fft])
-
-  // Client-side Power Spectrum using fast FFT
-  const computeClientPowerSpectrum = useCallback((rawData, sampleRate) => {
-    const nperseg = Math.min(2048, Math.pow(2, Math.floor(Math.log2(rawData.length / 4))))
-    if (nperseg < 256) return null
-
-    const numBins = nperseg / 2
-    const powerSum = new Float64Array(numBins)
-    const hop = nperseg / 2
-    const numSegments = Math.floor((rawData.length - nperseg) / hop) + 1
-
-    // Hanning window
-    const window = new Float64Array(nperseg)
-    let windowPower = 0
-    for (let i = 0; i < nperseg; i++) {
-      window[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (nperseg - 1)))
-      windowPower += window[i] * window[i]
+  // Request band segment immediately when showBands is enabled
+  useEffect(() => {
+    if (showBands && wsConnected && audioInfo) {
+      const winSize = windowSize >= audioInfo.duration ? 'full' : windowSize
+      requestBandSegment(currentTime, winSize)
     }
+  }, [showBands, wsConnected, audioInfo, windowSize, currentTime, requestBandSegment])
 
-    // Process segments
-    for (let seg = 0; seg < Math.min(numSegments, 20); seg++) { // Limit segments for speed
-      const start = seg * hop
-      const real = new Float64Array(nperseg)
-      const imag = new Float64Array(nperseg)
-
-      for (let i = 0; i < nperseg; i++) {
-        real[i] = (rawData[start + i] || 0) * window[i]
-      }
-
-      fft(real, imag)
-
-      for (let k = 0; k < numBins; k++) {
-        powerSum[k] += (real[k] * real[k] + imag[k] * imag[k]) / (windowPower * sampleRate)
-      }
+  // Handle viz type change
+  useEffect(() => {
+    if (wsConnected && vizType) {
+      requestVisualization(vizType)
     }
+  }, [vizType, wsConnected, requestVisualization])
 
-    // Average and convert to dB
-    const actualSegments = Math.min(numSegments, 20)
-    const frequencies = []
-    const power = []
-    const maxFreqIdx = Math.min(numBins, Math.floor(20000 * nperseg / sampleRate))
-    const targetPoints = 500
-    const step = Math.max(1, Math.floor(maxFreqIdx / targetPoints))
-
-    for (let i = 0; i < maxFreqIdx; i += step) {
-      frequencies.push(i * sampleRate / nperseg)
-      power.push(10 * Math.log10(powerSum[i] / actualSegments + 1e-10))
-    }
-
-    return { frequencies, power }
-  }, [fft])
-
-  // Client-side Spectrogram using STFT
-  const computeClientSpectrogram = useCallback((rawData, sampleRate) => {
-    const nperseg = 1024
-    const hop = 512
-    const numBins = nperseg / 2
-
-    const numFrames = Math.floor((rawData.length - nperseg) / hop) + 1
-    if (numFrames < 2) return null
-
-    // Limit frames for performance
-    const maxFrames = 300
-    const frameStep = Math.max(1, Math.floor(numFrames / maxFrames))
-    const actualFrames = Math.ceil(numFrames / frameStep)
-
-    // Hanning window
-    const window = new Float64Array(nperseg)
-    for (let i = 0; i < nperseg; i++) {
-      window[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (nperseg - 1)))
-    }
-
-    const spectrogram = []
-    const times = []
-    let minDb = Infinity, maxDb = -Infinity
-
-    // Limit frequency to ~10kHz for display
-    const maxFreqBin = Math.min(numBins, Math.floor(10000 * nperseg / sampleRate))
-    const freqStep = Math.max(1, Math.floor(maxFreqBin / 100))
-
-    for (let frame = 0; frame < numFrames; frame += frameStep) {
-      const start = frame * hop
-      const real = new Float64Array(nperseg)
-      const imag = new Float64Array(nperseg)
-
-      for (let i = 0; i < nperseg; i++) {
-        real[i] = (rawData[start + i] || 0) * window[i]
-      }
-
-      fft(real, imag)
-
-      const frameMags = []
-      for (let k = 0; k < maxFreqBin; k += freqStep) {
-        const mag = Math.sqrt(real[k] * real[k] + imag[k] * imag[k])
-        const db = 10 * Math.log10(mag + 1e-10)
-        frameMags.push(db)
-        if (db < minDb) minDb = db
-        if (db > maxDb) maxDb = db
-      }
-      spectrogram.push(frameMags)
-      times.push(start / sampleRate)
-    }
-
-    // Transpose for proper orientation (freq x time)
-    const transposed = []
-    const numFreqs = spectrogram[0].length
-    for (let f = 0; f < numFreqs; f++) {
-      transposed.push(spectrogram.map(frame => frame[f]))
-    }
-
-    const frequencies = []
-    for (let k = 0; k < maxFreqBin; k += freqStep) {
-      frequencies.push(k * sampleRate / nperseg)
-    }
-
-    return {
-      spectrogram: transposed,
-      times,
-      frequencies,
-      min_db: minDb,
-      max_db: maxDb
-    }
-  }, [fft])
-
-  // Perform analysis - ALL client-side now!
-  const performAnalysis = useCallback(async (type) => {
-    if (type === 'waveform') return
-    if (!rawAudioDataRef.current) return
-
-    setAnalysisLoading(true)
-    setError(null)
-
-    // Use setTimeout to avoid blocking UI
-    setTimeout(() => {
-      try {
-        const { data, sampleRate } = rawAudioDataRef.current
-        let result
-
-        if (type === 'fft') {
-          result = computeClientFFT(data, sampleRate)
-        } else if (type === 'power_spectrum') {
-          result = computeClientPowerSpectrum(data, sampleRate)
-        } else if (type === 'spectrogram') {
-          result = computeClientSpectrogram(data, sampleRate)
+  // Request waveform segments only when needed (not every frame)
+  const lastSegmentRequestRef = useRef({ time: 0, windowSize: null, showBands: false })
+  
+  useEffect(() => {
+    if (vizType === 'waveform' && wsConnected && audioInfo) {
+      const winSize = windowSize >= audioInfo.duration ? 'full' : windowSize
+      
+      // For 'full' view, only request once
+      if (winSize === 'full') {
+        if (lastSegmentRequestRef.current.windowSize !== 'full' || lastSegmentRequestRef.current.showBands !== showBands) {
+          requestWaveformSegment(0, 'full')
+          if (showBands) requestBandSegment(0, 'full')
+          lastSegmentRequestRef.current = { time: 0, windowSize: 'full', showBands }
         }
-
-        if (result) {
-          setAnalysisData(result)
-        } else {
-          setError('Audio too short for analysis')
-        }
-      } catch (err) {
-        setError(`Analysis error: ${err.message}`)
-      } finally {
-        setAnalysisLoading(false)
+        return
       }
-    }, 50)
-  }, [computeClientFFT, computeClientPowerSpectrum, computeClientSpectrogram])
+      
+      // For windowed view, only request new segment when approaching boundaries
+      const segmentStart = waveformSegment?.start_time ?? 0
+      const segmentEnd = segmentStart + (typeof winSize === 'number' ? winSize : 5)
+      
+      // Request new segment if:
+      // 1. Window size changed
+      // 2. Current time is past 75% of segment or before start
+      // 3. showBands toggled
+      const needsNewSegment = 
+        lastSegmentRequestRef.current.windowSize !== winSize ||
+        lastSegmentRequestRef.current.showBands !== showBands ||
+        !waveformSegment ||
+        currentTime < segmentStart ||
+        currentTime > segmentStart + (segmentEnd - segmentStart) * 0.75
+      
+      if (needsNewSegment) {
+        requestWaveformSegment(currentTime, winSize)
+        if (showBands) requestBandSegment(currentTime, winSize)
+        lastSegmentRequestRef.current = { time: currentTime, windowSize: winSize, showBands }
+      }
+    }
+  }, [currentTime, windowSize, vizType, wsConnected, audioInfo, requestWaveformSegment, requestBandSegment, waveformSegment, showBands])
 
-  // Draw waveform
+  // ============ DRAWING FUNCTIONS (visualization only) ============
+  
   const drawWaveform = useCallback((ctx, width, height, padding) => {
-    if (!audioData?.waveform) return
-
-    const { waveform, duration, maxAmplitude } = audioData
+    if (!waveformSegment) return
+    
+    const { segment, max_amplitude, start_time, window_size, duration } = waveformSegment
     const centerY = height / 2
-
-    // Calculate visible time range
-    const halfWindow = windowSize / 2
-    let startTime = currentTime - halfWindow
-    let endTime = currentTime + halfWindow
-
-    if (startTime < 0) {
-      startTime = 0
-      endTime = Math.min(windowSize, duration)
-    }
-    if (endTime > duration) {
-      endTime = duration
-      startTime = Math.max(0, duration - windowSize)
-    }
-
-    const samplesPerSecond = waveform.length / duration
-    const startSample = Math.floor(startTime * samplesPerSecond)
-    const endSample = Math.ceil(endTime * samplesPerSecond)
-    let visibleWaveform = waveform.slice(startSample, endSample)
-    const visibleDuration = endTime - startTime
-
-    // PERFORMANCE: Downsample visible waveform to max ~2000 points
-    const maxRenderPoints = 2000
-    if (visibleWaveform.length > maxRenderPoints) {
-      const downsampleStep = Math.ceil(visibleWaveform.length / maxRenderPoints)
-      const downsampled = []
-      for (let i = 0; i < visibleWaveform.length; i += downsampleStep) {
-        // Take max absolute value in each chunk for better peak representation
-        let maxVal = visibleWaveform[i]
-        let minVal = visibleWaveform[i]
-        for (let j = i; j < Math.min(i + downsampleStep, visibleWaveform.length); j++) {
-          if (visibleWaveform[j] > maxVal) maxVal = visibleWaveform[j]
-          if (visibleWaveform[j] < minVal) minVal = visibleWaveform[j]
-        }
-        // Push the value with larger absolute magnitude
-        downsampled.push(Math.abs(maxVal) > Math.abs(minVal) ? maxVal : minVal)
-      }
-      visibleWaveform = downsampled
-    }
-
-    // Draw grid
+    const drawWidth = width - padding * 2
+    const drawHeight = (height - padding * 2) / 2
+    
+    // Duration of this segment
+    const totalDuration = duration || audioInfo?.duration || 1
+    const segmentDuration = window_size === 'full' ? totalDuration : window_size
+    const endTime = start_time + segmentDuration
+    
+    // Grid
     ctx.strokeStyle = '#1a1a26'
     ctx.lineWidth = 1
     for (let i = 0; i <= 4; i++) {
@@ -327,66 +218,114 @@ function App() {
       ctx.lineTo(width - padding, y)
       ctx.stroke()
     }
-
-    const timeStep = visibleDuration <= 5 ? 0.5 : visibleDuration <= 20 ? 1 : Math.ceil(visibleDuration / 10)
-    const firstGridTime = Math.ceil(startTime / timeStep) * timeStep
+    
+    // Time grid
+    const timeStep = segmentDuration <= 5 ? 0.5 : segmentDuration <= 20 ? 1 : Math.ceil(segmentDuration / 10)
+    const firstGridTime = Math.ceil(start_time / timeStep) * timeStep
+    
     for (let t = firstGridTime; t <= endTime; t += timeStep) {
-      const x = padding + ((t - startTime) / visibleDuration) * (width - padding * 2)
+      const x = padding + ((t - start_time) / segmentDuration) * drawWidth
       ctx.beginPath()
       ctx.moveTo(x, padding)
       ctx.lineTo(x, height - padding)
       ctx.stroke()
     }
-
+    
     // Center line
     ctx.strokeStyle = '#2a2a3a'
     ctx.beginPath()
     ctx.moveTo(padding, centerY)
     ctx.lineTo(width - padding, centerY)
     ctx.stroke()
-
-    const drawWidth = width - padding * 2
-    const drawHeight = (height - padding * 2) / 2
-
-    // Draw waveform using FIXED global maxAmplitude
-    const gradient = ctx.createLinearGradient(0, padding, 0, height - padding)
-    gradient.addColorStop(0, '#818cf8')
-    gradient.addColorStop(0.5, '#6366f1')
-    gradient.addColorStop(1, '#818cf8')
-    ctx.strokeStyle = gradient
-    ctx.lineWidth = 1.5
-    ctx.beginPath()
-
-    visibleWaveform.forEach((sample, i) => {
-      const x = padding + (i / visibleWaveform.length) * drawWidth
-      const y = centerY - (sample / maxAmplitude) * drawHeight * 0.9
-      if (i === 0) ctx.moveTo(x, y)
-      else ctx.lineTo(x, y)
-    })
-    ctx.stroke()
-
-    // Fill
-    ctx.fillStyle = 'rgba(99, 102, 241, 0.1)'
-    ctx.beginPath()
-    ctx.moveTo(padding, centerY)
-    visibleWaveform.forEach((sample, i) => {
-      const x = padding + (i / visibleWaveform.length) * drawWidth
-      const y = centerY - (sample / maxAmplitude) * drawHeight * 0.9
-      ctx.lineTo(x, y)
-    })
-    ctx.lineTo(width - padding, centerY)
-    ctx.closePath()
-    ctx.fill()
-
-    // Playhead
-    if (currentTime >= startTime && currentTime <= endTime) {
-      const playheadX = padding + ((currentTime - startTime) / visibleDuration) * drawWidth
+    
+    // Draw frequency bands if enabled
+    if (showBands && bandSegment && bandSegment.bands) {
+      // Draw each visible band - normalize each band to make them visible
+      const bandOrder = ['sub_bass', 'bass', 'low_mid', 'mid', 'high_mid', 'high']
+      
+      // First pass: calculate max amplitude for each visible band
+      const bandMaxAmplitudes = {}
+      bandOrder.forEach(bandName => {
+        if (!visibleBands[bandName]) return
+        const band = bandSegment.bands[bandName]
+        if (!band?.segment) return
+        const bandMax = Math.max(...band.segment.map(Math.abs))
+        bandMaxAmplitudes[bandName] = bandMax > 0 ? bandMax : 0.001
+      })
+      
+      // Draw each band
+      bandOrder.forEach(bandName => {
+        if (!visibleBands[bandName]) return
+        const band = bandSegment.bands[bandName]
+        if (!band?.segment) return
+        
+        const bandData = band.segment
+        const color = band.color
+        const bandMax = bandMaxAmplitudes[bandName]
+        
+        // Draw band waveform
+        ctx.strokeStyle = color
+        ctx.lineWidth = 2
+        ctx.globalAlpha = 0.85
+        ctx.beginPath()
+        
+        bandData.forEach((sample, i) => {
+          const x = padding + (i / bandData.length) * drawWidth
+          // Normalize each band to its own max amplitude so it fills the display
+          const y = centerY - (sample / bandMax) * drawHeight * 0.8
+          if (i === 0) ctx.moveTo(x, y)
+          else ctx.lineTo(x, y)
+        })
+        ctx.stroke()
+        ctx.globalAlpha = 1
+      })
+    } else {
+      // Original single waveform
+      const gradient = ctx.createLinearGradient(0, padding, 0, height - padding)
+      gradient.addColorStop(0, '#818cf8')
+      gradient.addColorStop(0.5, '#6366f1')
+      gradient.addColorStop(1, '#818cf8')
+      ctx.strokeStyle = gradient
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      
+      segment.forEach((sample, i) => {
+        const x = padding + (i / segment.length) * drawWidth
+        const y = centerY - (sample / max_amplitude) * drawHeight * 0.9
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      })
+      ctx.stroke()
+      
+      // Fill
+      ctx.fillStyle = 'rgba(99, 102, 241, 0.1)'
+      ctx.beginPath()
+      ctx.moveTo(padding, centerY)
+      segment.forEach((sample, i) => {
+        const x = padding + (i / segment.length) * drawWidth
+        const y = centerY - (sample / max_amplitude) * drawHeight * 0.9
+        ctx.lineTo(x, y)
+      })
+      ctx.lineTo(width - padding, centerY)
+      ctx.closePath()
+      ctx.fill()
+    }
+    
+    // Playhead - smooth movement through the waveform
+    // Use ref value for smoother animation when playing
+    const playTime = currentTimeRef.current || currentTime
+    if (playTime >= start_time && playTime <= endTime) {
+      const playheadX = padding + ((playTime - start_time) / segmentDuration) * drawWidth
+      
+      // Draw playhead line
       ctx.strokeStyle = '#10b981'
       ctx.lineWidth = 2
       ctx.beginPath()
       ctx.moveTo(playheadX, padding)
       ctx.lineTo(playheadX, height - padding)
       ctx.stroke()
+      
+      // Playhead triangle
       ctx.fillStyle = '#10b981'
       ctx.beginPath()
       ctx.moveTo(playheadX, padding - 8)
@@ -395,21 +334,21 @@ function App() {
       ctx.closePath()
       ctx.fill()
     }
-
-    // Labels - using FIXED maxAmplitude
+    
+    // Labels
     ctx.fillStyle = '#55556a'
     ctx.font = '11px Outfit'
     ctx.textAlign = 'right'
-    ctx.fillText(maxAmplitude.toFixed(2), padding - 8, padding + 4)
+    ctx.fillText(max_amplitude.toFixed(2), padding - 8, padding + 4)
     ctx.fillText('0', padding - 8, centerY + 4)
-    ctx.fillText(`-${maxAmplitude.toFixed(2)}`, padding - 8, height - padding + 4)
-
+    ctx.fillText(`-${max_amplitude.toFixed(2)}`, padding - 8, height - padding + 4)
+    
     ctx.textAlign = 'center'
     for (let t = firstGridTime; t <= endTime; t += timeStep) {
-      const x = padding + ((t - startTime) / visibleDuration) * (width - padding * 2)
+      const x = padding + ((t - start_time) / segmentDuration) * drawWidth
       ctx.fillText(`${t.toFixed(1)}s`, x, height - padding + 20)
     }
-
+    
     ctx.fillStyle = '#8888a0'
     ctx.font = '12px Outfit'
     ctx.save()
@@ -419,16 +358,15 @@ function App() {
     ctx.restore()
     ctx.textAlign = 'center'
     ctx.fillText('Time (seconds)', width / 2, height - 8)
-  }, [audioData, currentTime, windowSize])
+  }, [waveformSegment, currentTime, audioInfo, showBands, bandSegment, visibleBands])
 
-  // Draw FFT / Frequency Spectrum
   const drawFFT = useCallback((ctx, width, height, padding) => {
-    if (!analysisData?.frequencies || !analysisData?.magnitudes) return
-
-    const { frequencies, magnitudes } = analysisData
+    if (!vizData || vizData.type !== 'fft') return
+    
+    const { frequencies, magnitudes } = vizData
     const drawWidth = width - padding * 2
     const drawHeight = height - padding * 2
-
+    
     // Grid
     ctx.strokeStyle = '#1a1a26'
     ctx.lineWidth = 1
@@ -439,13 +377,12 @@ function App() {
       ctx.lineTo(width - padding, y)
       ctx.stroke()
     }
-
-    // Find range
+    
     const minMag = Math.min(...magnitudes)
     const maxMag = Math.max(...magnitudes)
     const range = maxMag - minMag || 1
-
-    // Draw spectrum
+    
+    // Spectrum fill
     const gradient = ctx.createLinearGradient(0, height - padding, 0, padding)
     gradient.addColorStop(0, '#6366f1')
     gradient.addColorStop(0.5, '#818cf8')
@@ -454,23 +391,21 @@ function App() {
     ctx.fillStyle = gradient
     ctx.beginPath()
     ctx.moveTo(padding, height - padding)
-
-    frequencies.forEach((freq, i) => {
+    frequencies.forEach((_, i) => {
       const x = padding + (i / frequencies.length) * drawWidth
       const normalized = (magnitudes[i] - minMag) / range
       const y = height - padding - normalized * drawHeight * 0.9
       ctx.lineTo(x, y)
     })
-
     ctx.lineTo(width - padding, height - padding)
     ctx.closePath()
     ctx.fill()
-
-    // Line on top
+    
+    // Line
     ctx.strokeStyle = '#a5b4fc'
     ctx.lineWidth = 1.5
     ctx.beginPath()
-    frequencies.forEach((freq, i) => {
+    frequencies.forEach((_, i) => {
       const x = padding + (i / frequencies.length) * drawWidth
       const normalized = (magnitudes[i] - minMag) / range
       const y = height - padding - normalized * drawHeight * 0.9
@@ -478,22 +413,21 @@ function App() {
       else ctx.lineTo(x, y)
     })
     ctx.stroke()
-
+    
     // Labels
     ctx.fillStyle = '#55556a'
     ctx.font = '11px Outfit'
     ctx.textAlign = 'right'
     ctx.fillText(`${maxMag.toFixed(0)} dB`, padding - 8, padding + 4)
-    ctx.fillText(`${((maxMag + minMag) / 2).toFixed(0)} dB`, padding - 8, height / 2)
     ctx.fillText(`${minMag.toFixed(0)} dB`, padding - 8, height - padding)
-
+    
     ctx.textAlign = 'center'
     const maxFreq = frequencies[frequencies.length - 1]
     for (let f = 0; f <= maxFreq; f += 5000) {
       const x = padding + (f / maxFreq) * drawWidth
       ctx.fillText(`${(f / 1000).toFixed(0)}k`, x, height - padding + 20)
     }
-
+    
     ctx.fillStyle = '#8888a0'
     ctx.font = '12px Outfit'
     ctx.save()
@@ -503,53 +437,42 @@ function App() {
     ctx.restore()
     ctx.textAlign = 'center'
     ctx.fillText('Frequency (Hz)', width / 2, height - 8)
-  }, [analysisData])
+  }, [vizData])
 
-  // Draw Spectrogram
   const drawSpectrogram = useCallback((ctx, width, height, padding) => {
-    if (!analysisData?.spectrogram) return
-
-    const { spectrogram, times, frequencies, min_db, max_db } = analysisData
+    if (!vizData || vizData.type !== 'spectrogram') return
+    
+    const { spectrogram, times, frequencies, min_db, max_db } = vizData
     const drawWidth = width - padding * 2
     const drawHeight = height - padding * 2
-
+    
     const numFreqs = spectrogram.length
     const numTimes = spectrogram[0]?.length || 0
-    
     const cellWidth = drawWidth / numTimes
     const cellHeight = drawHeight / numFreqs
-
-    // Color mapping function (viridis-like)
+    
     const getColor = (value) => {
       const t = Math.max(0, Math.min(1, (value - min_db) / (max_db - min_db)))
-      const r = Math.floor(68 + t * 187)
-      const g = Math.floor(1 + t * 150)
-      const b = Math.floor(84 + t * 100)
-      return `rgb(${r}, ${g}, ${b})`
+      return `rgb(${Math.floor(68 + t * 187)}, ${Math.floor(1 + t * 150)}, ${Math.floor(84 + t * 100)})`
     }
-
-    // Draw spectrogram cells
+    
     for (let f = 0; f < numFreqs; f++) {
       for (let t = 0; t < numTimes; t++) {
-        const value = spectrogram[f][t]
-        ctx.fillStyle = getColor(value)
-        const x = padding + t * cellWidth
-        const y = height - padding - (f + 1) * cellHeight
-        ctx.fillRect(x, y, cellWidth + 1, cellHeight + 1)
+        ctx.fillStyle = getColor(spectrogram[f][t])
+        ctx.fillRect(padding + t * cellWidth, height - padding - (f + 1) * cellHeight, cellWidth + 1, cellHeight + 1)
       }
     }
-
+    
     // Labels
     ctx.fillStyle = '#55556a'
     ctx.font = '11px Outfit'
     ctx.textAlign = 'right'
-    
     const maxFreq = frequencies[frequencies.length - 1]
     for (let f = 0; f <= maxFreq; f += 5000) {
       const y = height - padding - (f / maxFreq) * drawHeight
       ctx.fillText(`${(f / 1000).toFixed(0)}k`, padding - 8, y + 4)
     }
-
+    
     ctx.textAlign = 'center'
     const maxTime = times[times.length - 1]
     const timeStep = Math.ceil(maxTime / 8)
@@ -557,7 +480,7 @@ function App() {
       const x = padding + (t / maxTime) * drawWidth
       ctx.fillText(`${t.toFixed(1)}s`, x, height - padding + 20)
     }
-
+    
     ctx.fillStyle = '#8888a0'
     ctx.font = '12px Outfit'
     ctx.save()
@@ -567,18 +490,15 @@ function App() {
     ctx.restore()
     ctx.textAlign = 'center'
     ctx.fillText('Time (seconds)', width / 2, height - 8)
-
+    
     // Color bar
-    const barWidth = 15
-    const barX = width - padding + 10
-    const barHeight = drawHeight
+    const barWidth = 15, barX = width - padding + 10
     const barGradient = ctx.createLinearGradient(0, height - padding, 0, padding)
     for (let i = 0; i <= 10; i++) {
-      const t = i / 10
-      barGradient.addColorStop(t, getColor(min_db + t * (max_db - min_db)))
+      barGradient.addColorStop(i / 10, getColor(min_db + (i / 10) * (max_db - min_db)))
     }
     ctx.fillStyle = barGradient
-    ctx.fillRect(barX, padding, barWidth, barHeight)
+    ctx.fillRect(barX, padding, barWidth, drawHeight)
     
     ctx.fillStyle = '#55556a'
     ctx.font = '10px Outfit'
@@ -586,16 +506,15 @@ function App() {
     ctx.fillText(`${max_db.toFixed(0)}`, barX + barWidth + 4, padding + 8)
     ctx.fillText(`${min_db.toFixed(0)}`, barX + barWidth + 4, height - padding)
     ctx.fillText('dB', barX + barWidth + 4, height / 2)
-  }, [analysisData])
+  }, [vizData])
 
-  // Draw Power Spectrum
   const drawPowerSpectrum = useCallback((ctx, width, height, padding) => {
-    if (!analysisData?.frequencies || !analysisData?.power) return
-
-    const { frequencies, power } = analysisData
+    if (!vizData || vizData.type !== 'power_spectrum') return
+    
+    const { frequencies, power } = vizData
     const drawWidth = width - padding * 2
     const drawHeight = height - padding * 2
-
+    
     // Grid
     ctx.strokeStyle = '#1a1a26'
     ctx.lineWidth = 1
@@ -606,12 +525,12 @@ function App() {
       ctx.lineTo(width - padding, y)
       ctx.stroke()
     }
-
+    
     const minPow = Math.min(...power)
     const maxPow = Math.max(...power)
     const range = maxPow - minPow || 1
-
-    // Fill under curve
+    
+    // Fill
     const gradient = ctx.createLinearGradient(0, height - padding, 0, padding)
     gradient.addColorStop(0, 'rgba(16, 185, 129, 0.3)')
     gradient.addColorStop(1, 'rgba(16, 185, 129, 0.05)')
@@ -619,45 +538,41 @@ function App() {
     ctx.fillStyle = gradient
     ctx.beginPath()
     ctx.moveTo(padding, height - padding)
-
-    frequencies.forEach((freq, i) => {
+    frequencies.forEach((_, i) => {
       const x = padding + (i / frequencies.length) * drawWidth
-      const normalized = (power[i] - minPow) / range
-      const y = height - padding - normalized * drawHeight * 0.9
+      const y = height - padding - ((power[i] - minPow) / range) * drawHeight * 0.9
       ctx.lineTo(x, y)
     })
-
     ctx.lineTo(width - padding, height - padding)
     ctx.closePath()
     ctx.fill()
-
+    
     // Line
     ctx.strokeStyle = '#10b981'
     ctx.lineWidth = 2
     ctx.beginPath()
-    frequencies.forEach((freq, i) => {
+    frequencies.forEach((_, i) => {
       const x = padding + (i / frequencies.length) * drawWidth
-      const normalized = (power[i] - minPow) / range
-      const y = height - padding - normalized * drawHeight * 0.9
+      const y = height - padding - ((power[i] - minPow) / range) * drawHeight * 0.9
       if (i === 0) ctx.moveTo(x, y)
       else ctx.lineTo(x, y)
     })
     ctx.stroke()
-
+    
     // Labels
     ctx.fillStyle = '#55556a'
     ctx.font = '11px Outfit'
     ctx.textAlign = 'right'
     ctx.fillText(`${maxPow.toFixed(0)} dB`, padding - 8, padding + 4)
     ctx.fillText(`${minPow.toFixed(0)} dB`, padding - 8, height - padding)
-
+    
     ctx.textAlign = 'center'
     const maxFreq = frequencies[frequencies.length - 1]
     for (let f = 0; f <= maxFreq; f += 5000) {
       const x = padding + (f / maxFreq) * drawWidth
       ctx.fillText(`${(f / 1000).toFixed(0)}k`, x, height - padding + 20)
     }
-
+    
     ctx.fillStyle = '#8888a0'
     ctx.font = '12px Outfit'
     ctx.save()
@@ -667,9 +582,9 @@ function App() {
     ctx.restore()
     ctx.textAlign = 'center'
     ctx.fillText('Frequency (Hz)', width / 2, height - 8)
-  }, [analysisData])
+  }, [vizData])
 
-  // Main draw function
+  // Main draw
   const draw = useCallback(() => {
     if (!canvasRef.current) return
     
@@ -678,40 +593,25 @@ function App() {
     const container = canvas.parentElement
     canvas.width = container.clientWidth
     canvas.height = container.clientHeight
-
-    const width = canvas.width
-    const height = canvas.height
+    
+    const { width, height } = canvas
     const padding = vizType === 'spectrogram' ? 50 : 40
-
-    // Clear
+    
     ctx.fillStyle = '#0a0a0f'
     ctx.fillRect(0, 0, width, height)
-
-    if (vizType === 'waveform') {
-      drawWaveform(ctx, width, height, padding)
-    } else if (vizType === 'fft') {
-      drawFFT(ctx, width, height, padding)
-    } else if (vizType === 'spectrogram') {
-      drawSpectrogram(ctx, width, height, padding)
-    } else if (vizType === 'power_spectrum') {
-      drawPowerSpectrum(ctx, width, height, padding)
-    }
+    
+    if (vizType === 'waveform') drawWaveform(ctx, width, height, padding)
+    else if (vizType === 'fft') drawFFT(ctx, width, height, padding)
+    else if (vizType === 'spectrogram') drawSpectrogram(ctx, width, height, padding)
+    else if (vizType === 'power_spectrum') drawPowerSpectrum(ctx, width, height, padding)
   }, [vizType, drawWaveform, drawFFT, drawSpectrogram, drawPowerSpectrum])
 
-  // Handle viz type change
+  // Redraw on data change
   useEffect(() => {
-    if (audioData && vizType !== 'waveform') {
-      performAnalysis(vizType)
+    if (vizData || waveformSegment || bandSegment) {
+      requestAnimationFrame(draw)
     }
-  }, [vizType, audioData, performAnalysis])
-
-  // Animation loop
-  const updatePlayback = useCallback(() => {
-    if (audioRef.current && !audioRef.current.paused) {
-      setCurrentTime(audioRef.current.currentTime)
-      animationRef.current = requestAnimationFrame(updatePlayback)
-    }
-  }, [])
+  }, [vizData, waveformSegment, bandSegment, draw, currentTime])
 
   // Resize handler
   useEffect(() => {
@@ -720,80 +620,86 @@ function App() {
     return () => window.removeEventListener('resize', handleResize)
   }, [draw])
 
-  // Draw when data changes
-  useEffect(() => {
-    if (audioData || analysisData) {
-      setTimeout(draw, 50)
+  // Animation loop for playback - smooth drawing using ref
+  const updatePlayback = useCallback(() => {
+    if (audioRef.current && !audioRef.current.paused) {
+      const time = audioRef.current.currentTime
+      currentTimeRef.current = time
+      
+      // Update state less frequently (every 100ms) for UI display
+      // But draw every frame for smooth playhead
+      setCurrentTime(time)
+      
+      // Request next frame
+      animationRef.current = requestAnimationFrame(updatePlayback)
     }
-  }, [audioData, analysisData, draw, currentTime])
+  }, [])
 
   // Cleanup
   useEffect(() => {
     return () => {
       if (animationRef.current) cancelAnimationFrame(animationRef.current)
+      if (wsRef.current) wsRef.current.close()
     }
   }, [])
 
-  // File upload handler
+  // ============ FILE UPLOAD ============
+  
   const handleFileUpload = async (file) => {
     if (!file) return
-
+    
     setLoading(true)
     setError(null)
-    setCurrentFile(file)
+    setVizData(null)
+    setWaveformSegment(null)
+    setBandSegment(null)
+    setShowBands(false)
     setVizType('waveform')
-    setAnalysisData(null)
-
+    
     try {
-      const arrayBuffer = await file.arrayBuffer()
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)()
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
-      const channelData = audioBuffer.getChannelData(0)
+      // Upload to backend for processing
+      const formData = new FormData()
+      formData.append('file', file)
       
-      // Store raw audio data for client-side analysis
-      rawAudioDataRef.current = {
-        data: new Float32Array(channelData),
-        sampleRate: audioBuffer.sampleRate
-      }
-      
-      const targetPoints = 10000
-      const step = Math.max(1, Math.floor(channelData.length / targetPoints))
-      const waveform = []
-      let globalMaxAmplitude = 0
-      
-      for (let i = 0; i < channelData.length; i += step) {
-        const sample = channelData[i]
-        waveform.push(sample)
-        const abs = Math.abs(sample)
-        if (abs > globalMaxAmplitude) globalMaxAmplitude = abs
-      }
-      
-      // Ensure minimum scale
-      globalMaxAmplitude = Math.max(globalMaxAmplitude, 0.01) * 1.05
-
-      const audioUrl = URL.createObjectURL(file)
-      
-      setAudioData({
-        filename: file.name,
-        duration: audioBuffer.duration,
-        sampleRate: audioBuffer.sampleRate,
-        channels: audioBuffer.numberOfChannels,
-        waveform,
-        points: waveform.length,
-        audioUrl,
-        maxAmplitude: globalMaxAmplitude
+      const response = await fetch(`${API_URL}/upload`, {
+        method: 'POST',
+        body: formData,
       })
+      
+      const data = await response.json()
+      
+      if (!response.ok) {
+        throw new Error(data.error || 'Upload failed')
+      }
+      
+      // Store session and audio info
+      setSessionId(data.session_id)
+      setAudioInfo({
+        filename: data.filename,
+        duration: data.duration,
+        sampleRate: data.sample_rate,
+        availableWindows: data.available_windows
+      })
+      
+      // Create audio URL for playback
+      const url = URL.createObjectURL(file)
+      setAudioUrl(url)
+      
+      // Connect WebSocket
+      connectWebSocket(data.session_id)
       
       setCurrentTime(0)
       setIsPlaying(false)
-      audioContext.close()
+      
     } catch (err) {
-      setError('Failed to process audio: ' + err.message)
+      setError(err.message)
     } finally {
       setLoading(false)
     }
   }
 
+  // ============ PLAYBACK CONTROLS ============
+  
   const togglePlayback = () => {
     if (!audioRef.current) return
     if (isPlaying) {
@@ -807,20 +713,52 @@ function App() {
   }
 
   const handleSeek = (e) => {
-    if (!audioRef.current || !audioData) return
+    if (!audioRef.current || !audioInfo) return
     const rect = e.currentTarget.getBoundingClientRect()
     const percentage = (e.clientX - rect.left) / rect.width
-    const newTime = percentage * audioData.duration
+    const newTime = percentage * audioInfo.duration
     audioRef.current.currentTime = newTime
+    currentTimeRef.current = newTime
     setCurrentTime(newTime)
   }
 
   const handleAudioEnded = () => {
     setIsPlaying(false)
+    currentTimeRef.current = 0
     setCurrentTime(0)
     if (animationRef.current) cancelAnimationFrame(animationRef.current)
   }
 
+  const clearAudio = async () => {
+    if (audioRef.current) audioRef.current.pause()
+    if (animationRef.current) cancelAnimationFrame(animationRef.current)
+    if (wsRef.current) wsRef.current.close()
+    if (audioUrl) URL.revokeObjectURL(audioUrl)
+    
+    // Clean up server session
+    if (sessionId) {
+      try {
+        await fetch(`${API_URL}/session/${sessionId}`, { method: 'DELETE' })
+      } catch (e) { /* ignore */ }
+    }
+    
+    setSessionId(null)
+    setAudioInfo(null)
+    setAudioUrl(null)
+    setVizData(null)
+    setWaveformSegment(null)
+    setBandSegment(null)
+    setShowBands(false)
+    setError(null)
+    setIsPlaying(false)
+    setCurrentTime(0)
+    setVizType('waveform')
+    setWsConnected(false)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  // ============ UI HANDLERS ============
+  
   const handleDragOver = (e) => { e.preventDefault(); setDragOver(true) }
   const handleDragLeave = (e) => { e.preventDefault(); setDragOver(false) }
   const handleDrop = (e) => {
@@ -838,29 +776,14 @@ function App() {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
-  const clearAudio = () => {
-    if (audioRef.current) audioRef.current.pause()
-    if (animationRef.current) cancelAnimationFrame(animationRef.current)
-    if (audioData?.audioUrl) URL.revokeObjectURL(audioData.audioUrl)
-    rawAudioDataRef.current = null
-    setAudioData(null)
-    setAnalysisData(null)
-    setCurrentFile(null)
-    setError(null)
-    setIsPlaying(false)
-    setCurrentTime(0)
-    setVizType('waveform')
-    if (fileInputRef.current) fileInputRef.current.value = ''
-  }
-
   const vizLabel = VISUALIZATION_TYPES.find(v => v.id === vizType)?.label || 'Visualization'
 
   return (
     <div className="app-container">
-      {audioData && (
+      {audioUrl && (
         <audio
           ref={audioRef}
-          src={audioData.audioUrl}
+          src={audioUrl}
           onEnded={handleAudioEnded}
           onTimeUpdate={() => setCurrentTime(audioRef.current?.currentTime || 0)}
         />
@@ -872,9 +795,9 @@ function App() {
           <span className="logo-text">WaveForm</span>
         </div>
         <div className="header-actions">
-          <div className="header-status">
+          <div className={`header-status ${wsConnected ? 'connected' : ''}`}>
             <span className="status-dot"></span>
-            <span>Ready</span>
+            <span>{wsConnected ? 'Connected' : 'Disconnected'}</span>
           </div>
         </div>
       </header>
@@ -929,14 +852,14 @@ function App() {
       </aside>
 
       <main className="main-content">
-        {audioData && (
+        {audioInfo && (
           <div className="file-info-card">
             <div className="file-details">
               <div className="file-icon">🎶</div>
               <div>
-                <div className="file-name">{audioData.filename}</div>
+                <div className="file-name">{audioInfo.filename}</div>
                 <div className="file-meta">
-                  {formatDuration(audioData.duration)} • {audioData.sampleRate} Hz
+                  {formatDuration(audioInfo.duration)} • {audioInfo.sampleRate} Hz
                 </div>
               </div>
             </div>
@@ -946,7 +869,7 @@ function App() {
           </div>
         )}
 
-        {audioData && (
+        {audioInfo && (
           <div className="player-controls">
             <button className="play-btn" onClick={togglePlayback}>
               {isPlaying ? '⏸️' : '▶️'}
@@ -955,13 +878,13 @@ function App() {
             <div className="time-display">
               <span className="current-time">{formatDuration(currentTime)}</span>
               <span className="time-separator">/</span>
-              <span className="total-time">{formatDuration(audioData.duration)}</span>
+              <span className="total-time">{formatDuration(audioInfo.duration)}</span>
             </div>
 
             <div className="progress-container" onClick={handleSeek}>
               <div className="progress-bar">
-                <div className="progress-fill" style={{ width: `${(currentTime / audioData.duration) * 100}%` }} />
-                <div className="progress-handle" style={{ left: `${(currentTime / audioData.duration) * 100}%` }} />
+                <div className="progress-fill" style={{ width: `${(currentTime / audioInfo.duration) * 100}%` }} />
+                <div className="progress-handle" style={{ left: `${(currentTime / audioInfo.duration) * 100}%` }} />
               </div>
             </div>
 
@@ -971,16 +894,14 @@ function App() {
                 <select 
                   className="window-select"
                   value={windowSize}
-                  onChange={(e) => setWindowSize(Number(e.target.value))}
+                  onChange={(e) => setWindowSize(e.target.value === 'full' ? 'full' : Number(e.target.value))}
                 >
                   <option value={1}>1 sec</option>
                   <option value={2}>2 sec</option>
                   <option value={3}>3 sec</option>
                   <option value={5}>5 sec</option>
                   <option value={10}>10 sec</option>
-                  <option value={30}>30 sec</option>
-                  <option value={60}>1 min</option>
-                  <option value={audioData.duration}>Full</option>
+                  <option value="full">Full</option>
                 </select>
               </div>
             )}
@@ -997,21 +918,58 @@ function App() {
                 ))}
               </select>
             </div>
+
+            {vizType === 'waveform' && (
+              <button 
+                className={`band-toggle-btn ${showBands ? 'active' : ''}`}
+                onClick={() => setShowBands(!showBands)}
+                title="Toggle frequency band separation"
+              >
+                🎛️ Bands
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Frequency Band Controls */}
+        {audioInfo && vizType === 'waveform' && showBands && (
+          <div className="band-controls">
+            <div className="band-controls-label">Frequency Bands:</div>
+            <div className="band-toggles">
+              {FREQUENCY_BANDS.map(band => (
+                <label 
+                  key={band.id} 
+                  className={`band-checkbox ${visibleBands[band.id] ? 'active' : ''}`}
+                  style={{ '--band-color': band.color }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={visibleBands[band.id]}
+                    onChange={(e) => setVisibleBands(prev => ({
+                      ...prev,
+                      [band.id]: e.target.checked
+                    }))}
+                  />
+                  <span className="band-color-dot" style={{ background: band.color }}></span>
+                  <span className="band-label">{band.shortLabel}</span>
+                </label>
+              ))}
+            </div>
           </div>
         )}
 
         <div className="waveform-container">
           <div className="waveform-header">
             <h2 className="waveform-title">{vizLabel}</h2>
-            {audioData && (
+            {audioInfo && (
               <div className="waveform-info">
                 {vizType === 'waveform' && (
                   <div className="info-badge">
-                    Window: <span className="info-badge-value">{windowSize}s</span>
+                    Window: <span className="info-badge-value">{windowSize === 'full' ? 'Full' : `${windowSize}s`}</span>
                   </div>
                 )}
                 <div className="info-badge">
-                  Sample Rate: <span className="info-badge-value">{audioData.sampleRate} Hz</span>
+                  Sample Rate: <span className="info-badge-value">{audioInfo.sampleRate} Hz</span>
                 </div>
               </div>
             )}
@@ -1024,14 +982,12 @@ function App() {
             </div>
           )}
 
-          {(loading || analysisLoading) ? (
+          {loading ? (
             <div className="loading-state">
               <div className="spinner"></div>
-              <div className="loading-text">
-                {analysisLoading ? 'Analyzing audio...' : 'Processing audio file...'}
-              </div>
+              <div className="loading-text">Processing audio on server...</div>
             </div>
-          ) : audioData ? (
+          ) : audioInfo ? (
             <div className="canvas-container">
               <canvas ref={canvasRef} className="waveform-canvas"></canvas>
             </div>
@@ -1040,7 +996,7 @@ function App() {
               <div className="empty-icon">🎧</div>
               <div className="empty-title">No Audio Loaded</div>
               <div className="empty-text">
-                Upload an audio file using the sidebar to visualize its waveform
+                Upload an audio file to visualize. All processing happens on the server.
               </div>
             </div>
           )}

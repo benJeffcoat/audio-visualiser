@@ -476,10 +476,13 @@
 }
 
 .progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
   height: 100%;
   background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
   border-radius: 3px;
-  transition: width 0.1s ease;
+  transition: width 0.05s linear;
 }
 
 .progress-handle {
@@ -491,7 +494,7 @@
   border-radius: 50%;
   transform: translate(-50%, -50%);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-  transition: transform 0.1s ease;
+  transition: left 0.05s linear;
 }
 
 .progress-container:hover .progress-handle {
@@ -542,4 +545,100 @@
 
 .viz-select {
   min-width: 160px;
+}
+
+/* Frequency Band Controls */
+.band-toggle-btn {
+  padding: 8px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.band-toggle-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.band-toggle-btn.active {
+  background: var(--accent-glow);
+  border-color: var(--accent-primary);
+  color: var(--accent-secondary);
+}
+
+.band-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.band-controls-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.band-toggles {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.band-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
+}
+
+.band-checkbox:hover {
+  background: var(--bg-hover);
+}
+
+.band-checkbox.active {
+  border-color: var(--band-color);
+  background: color-mix(in srgb, var(--band-color) 15%, var(--bg-tertiary));
+}
+
+.band-checkbox input {
+  display: none;
+}
+
+.band-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.band-label {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.band-checkbox:not(.active) .band-color-dot {
+  opacity: 0.4;
+}
+
+.band-checkbox:not(.active) .band-label {
+  color: var(--text-muted);
 }
